@@ -55,6 +55,7 @@ class SenseService : Service() {
     private var mOnLockoutTimer = false
     private var mUserUnlocked = false
     private var mIsAuthenticated = false
+    private var mLastAcquired = -1
 
     private val mLockoutLock = Any()
     private val mAuthErrorLock = Any()
@@ -122,6 +123,9 @@ class SenseService : Service() {
                             " run: fake = " + imageData[0] + ", low = " + imageData[1] +
                             ", compare score:" + imageData[2] + " live score:" + imageData[3].toDouble() / 100.0
                 )
+                if (result != 0) {
+                    reportAcquired(result)
+                }
                 synchronized(this) {
                     if (mCameraAuthController == null) {
                         return -1
@@ -555,6 +559,7 @@ class SenseService : Service() {
             } else if (mLockoutType != LOCKOUT_TYPE_DISABLED) {
                 sendLockoutError()
             } else {
+                mLastAcquired = -1
                 mWorkHandler!!.post {
                     mVendorImpl!!.compareStart()
                     synchronized(this) {
@@ -658,6 +663,35 @@ class SenseService : Service() {
         override fun resetLockout(cryptoToken: ByteArray?) {
             activateUser()
             resetLockoutCount()
+        }
+    }
+
+    // Translate a Megvii compare() result into a framework acquired code, so keyguard can
+    // show its own hint ("Not enough light", "Move phone closer", ...). Results with no
+    // AOSP equivalent (several faces, half shadow), face-off-centre results whose
+    // left/right depends on sensor orientation, and plain "no match yet" are not reported.
+    private fun reportAcquired(result: Int) {
+        val acquired = when (result) {
+            Constants.MSG_UNLOCK_FACE_NOT_FOUND -> BiometricFaceConstants.FACE_ACQUIRED_NOT_DETECTED
+            Constants.MSG_UNLOCK_FACE_SCALE_TOO_SMALL -> BiometricFaceConstants.FACE_ACQUIRED_TOO_FAR
+            Constants.MSG_UNLOCK_FACE_SCALE_TOO_LARGE -> BiometricFaceConstants.FACE_ACQUIRED_TOO_CLOSE
+            Constants.MSG_UNLOCK_FACE_ROTATED_LEFT,
+            Constants.MSG_UNLOCK_FACE_ROTATED_RIGHT -> BiometricFaceConstants.FACE_ACQUIRED_PAN_TOO_EXTREME
+            Constants.MSG_UNLOCK_FACE_BLUR -> BiometricFaceConstants.FACE_ACQUIRED_TOO_MUCH_MOTION
+            Constants.MSG_UNLOCK_FACE_NOT_COMPLETE -> BiometricFaceConstants.FACE_ACQUIRED_FACE_OBSCURED
+            Constants.MSG_UNLOCK_DARKLIGHT -> BiometricFaceConstants.FACE_ACQUIRED_TOO_DARK
+            Constants.MSG_UNLOCK_HIGHLIGHT -> BiometricFaceConstants.FACE_ACQUIRED_TOO_BRIGHT
+            else -> return
+        }
+        // compare() runs on every preview frame; only report changes.
+        if (acquired == mLastAcquired) {
+            return
+        }
+        mLastAcquired = acquired
+        try {
+            mSenseReceiver?.onAcquired(mUserId, acquired, 0)
+        } catch (e: RemoteException) {
+            e.printStackTrace()
         }
     }
 
