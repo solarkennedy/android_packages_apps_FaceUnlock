@@ -33,7 +33,6 @@ import vendor.aospa.biometrics.face.ISenseServiceReceiver
 
 class SenseService : Service() {
 
-    private lateinit var mIdleTimeoutIntent: PendingIntent
     private lateinit var mLockoutTimeoutIntent: PendingIntent
     private var mAlarmManager: AlarmManager? = null
     private var mCameraAuthController: FaceAuthenticationController? = null
@@ -53,7 +52,6 @@ class SenseService : Service() {
     private var mLockoutType = LOCKOUT_TYPE_DISABLED
     private var mChallenge: Long = 0
     private var mEnrollToken: ByteArray? = null
-    private var mOnIdleTimer = false
     private var mOnLockoutTimer = false
     private var mUserUnlocked = false
     private var mIsAuthenticated = false
@@ -65,7 +63,6 @@ class SenseService : Service() {
         var authenticationErrorCount: Int = 0,
         var authenticationErrorThrottleCount: Int = 0,
         var lockoutType: Int = LOCKOUT_TYPE_DISABLED,
-        var onIdleTimer: Boolean = false,
         var onLockoutTimer: Boolean = false,
         var userUnlocked: Boolean = false
     )
@@ -79,12 +76,6 @@ class SenseService : Service() {
             val userId = intent.getIntExtra(Intent.EXTRA_USER_ID, mUserId)
             val state = mUserStates[userId]
             when (action) {
-                ALARM_TIMEOUT_FREEZED -> if (userId == mUserId) {
-                    synchronized(mLockoutLock) { mLockoutType = LOCKOUT_TYPE_IDLE }
-                } else {
-                    state?.lockoutType = LOCKOUT_TYPE_IDLE
-                    state?.onIdleTimer = false
-                }
                 ALARM_FAIL_TIMEOUT_LOCKOUT -> if (userId == mUserId) {
                     cancelLockoutTimer()
                     synchronized(mLockoutLock) { mLockoutType = LOCKOUT_TYPE_DISABLED }
@@ -277,7 +268,6 @@ class SenseService : Service() {
         mAlarmManager = getSystemService(AlarmManager::class.java)
         activateUser(UserHandle.USER_SYSTEM)
         val intentFilter = IntentFilter()
-        intentFilter.addAction(ALARM_TIMEOUT_FREEZED)
         intentFilter.addAction(ALARM_FAIL_TIMEOUT_LOCKOUT)
         intentFilter.addAction(Intent.ACTION_SCREEN_OFF)
         intentFilter.addAction(Intent.ACTION_USER_PRESENT)
@@ -310,7 +300,6 @@ class SenseService : Service() {
                 mAuthenticationErrorCount,
                 mAuthenticationErrorThrottleCount,
                 mLockoutType,
-                mOnIdleTimer,
                 mOnLockoutTimer,
                 mUserUnlocked
             )
@@ -325,10 +314,8 @@ class SenseService : Service() {
         mAuthenticationErrorCount = state.authenticationErrorCount
         mAuthenticationErrorThrottleCount = state.authenticationErrorThrottleCount
         mLockoutType = state.lockoutType
-        mOnIdleTimer = state.onIdleTimer
         mOnLockoutTimer = state.onLockoutTimer
         mUserUnlocked = state.userUnlocked
-        mIdleTimeoutIntent = timerIntent(ALARM_TIMEOUT_FREEZED, userId)
         mLockoutTimeoutIntent = timerIntent(ALARM_FAIL_TIMEOUT_LOCKOUT, userId)
         mChallenge = 0
         mChallengeCount = 0
@@ -404,17 +391,6 @@ class SenseService : Service() {
         }
     }
 
-    private fun startIdleTimer() {
-        mOnIdleTimer = true
-        mAlarmManager!![AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + DEFAULT_IDLE_TIMEOUT_MS] =
-            mIdleTimeoutIntent!!
-    }
-
-    private fun cancelIdleTimer() {
-        mOnIdleTimer = false
-        mAlarmManager!!.cancel(mIdleTimeoutIntent!!)
-    }
-
     private fun startLockoutTimer() {
         val elapsedRealtime = SystemClock.elapsedRealtime() + FAIL_LOCKOUT_TIMEOUT_MS
         mOnLockoutTimer = true
@@ -463,13 +439,10 @@ class SenseService : Service() {
     }
 
     private fun updateTimersAndLockout() {
-        if (mPreferenceHelper!!.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) > -1 && !mUserUnlocked) {
-            if (!mOnIdleTimer) {
-                cancelIdleTimer()
-                startIdleTimer()
-            }
-        } else {
-            cancelIdleTimer()
+        // The 4-hour idle timeout for non-strong biometrics is enforced by the framework
+        // (LockSettingsStrongAuth, armed by keyguard on every lock); keyguard then stops
+        // asking for face auth and prompts for the screen lock itself.
+        if (mPreferenceHelper!!.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) <= -1 || mUserUnlocked) {
             resetLockoutCount()
         }
     }
@@ -694,7 +667,6 @@ class SenseService : Service() {
             LOCKOUT_TYPE_PERMANENT -> errorCode =
                 BiometricFaceConstants.FACE_ERROR_LOCKOUT_PERMANENT
             LOCKOUT_TYPE_TIMED -> errorCode = BiometricFaceConstants.FACE_ERROR_LOCKOUT
-            LOCKOUT_TYPE_IDLE -> errorCode = BiometricFaceConstants.FACE_ERROR_VENDOR
         }
         try {
             mSenseReceiver?.onError(errorCode, 0)
@@ -718,9 +690,6 @@ class SenseService : Service() {
     companion object {
         private const val TAG = "SenseService"
         private const val ALARM_FAIL_TIMEOUT_LOCKOUT = "co.aospa.sense.ACTION_LOCKOUT_RESET"
-        private const val ALARM_TIMEOUT_FREEZED = "co.aospa.sense.freezedtimeout"
-        private const val DEFAULT_IDLE_TIMEOUT_MS = (3600000 * 4 // 4 hours
-                ).toLong()
         private const val FAIL_LOCKOUT_TIMEOUT_MS: Long = 30000 // 30 seconds
         private const val MAX_FAILED_ATTEMPTS_LOCKOUT_PERMANENT = 10
         private const val MAX_FAILED_ATTEMPTS_LOCKOUT_TIMED = 5
@@ -728,6 +697,5 @@ class SenseService : Service() {
         private const val LOCKOUT_TYPE_DISABLED = 0
         private const val LOCKOUT_TYPE_TIMED = 1
         private const val LOCKOUT_TYPE_PERMANENT = 2
-        private const val LOCKOUT_TYPE_IDLE = 3
     }
 }
