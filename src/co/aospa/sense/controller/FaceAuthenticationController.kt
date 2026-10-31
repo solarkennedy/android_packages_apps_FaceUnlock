@@ -138,8 +138,10 @@ open class FaceAuthenticationController(
 
     private fun initWorkHandler() {
         if (mFaceUnlockThread == null) {
-            mFaceUnlockThread = HandlerThread("Camera Face unlock")
-            mFaceUnlockThread!!.priority = Process.THREAD_PRIORITY_BACKGROUND
+            // Android priority via the constructor. The old `.priority = 10` set the
+            // java.lang.Thread priority (1..10), i.e. Java MAX, which ART maps to about
+            // nice -8; say so explicitly. This thread runs the per-frame Megvii compare.
+            mFaceUnlockThread = HandlerThread("Camera Face unlock", Process.THREAD_PRIORITY_URGENT_DISPLAY)
             mFaceUnlockThread!!.start()
         }
         mFaceUnlockHandler = FaceHandler(

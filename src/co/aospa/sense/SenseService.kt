@@ -10,14 +10,12 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.hardware.Camera
 import android.hardware.biometrics.BiometricFaceConstants
-import android.hardware.camera2.CameraManager
 import android.os.*
 import android.util.Log
 import androidx.core.content.ContextCompat
 
 import co.aospa.sense.controller.FaceAuthenticationController
 import co.aospa.sense.controller.FaceEnrollController
-import co.aospa.sense.camera.CameraUtil
 import co.aospa.sense.util.Constants
 import co.aospa.sense.util.PreferenceHelper
 import co.aospa.sense.util.SenseUserContext
@@ -37,14 +35,12 @@ class SenseService : Service() {
     private var mAlarmManager: AlarmManager? = null
     private var mCameraAuthController: FaceAuthenticationController? = null
     private var mCameraEnrollController: FaceEnrollController? = null
-    private var mCameraManager: CameraManager? = null
     private var mSenseReceiver: ISenseServiceReceiver? = null
     private lateinit var mUserContext: Context
     private var mPreferenceHelper: PreferenceHelper? = null
     private var mVendorImpl: Vendor? = null
     private val mUserStates = mutableMapOf<Int, UserState>()
     private var mIsVendorInit = false
-    private var mCameraId = 0
     private var mChallengeCount = 0
     private var mUserId = 0
     private var mAuthenticationErrorCount = 0
@@ -54,8 +50,7 @@ class SenseService : Service() {
     private var mEnrollToken: ByteArray? = null
     private var mOnLockoutTimer = false
     private var mUserUnlocked = false
-    private var mIsAuthenticated = false
-    private var mLastAcquired = -1
+    @Volatile private var mLastAcquired = -1
 
     private val mLockoutLock = Any()
     private val mAuthErrorLock = Any()
@@ -94,22 +89,6 @@ class SenseService : Service() {
         }
     }
 
-    private val mCameraAvailabilityCallback: CameraManager.AvailabilityCallback =
-        object : CameraManager.AvailabilityCallback() {
-            override fun onCameraAvailable(cameraId: String) {
-                super.onCameraAvailable(cameraId)
-                if (mCameraId == cameraId.toInt() && mIsAuthenticated) {
-                    mCameraManager!!.unregisterAvailabilityCallback(this)
-                    mIsAuthenticated = false
-                    onAuthenticated()
-                }
-            }
-
-            override fun onCameraUnavailable(cameraId: String) {
-                super.onCameraUnavailable(cameraId)
-            }
-        }
-
     private val mCameraAuthControllerCallback: FaceAuthenticationController.ServiceCallback =
         object : FaceAuthenticationController.ServiceCallback {
             override fun handlePreviewData(data: ByteArray?, width: Int, height: Int): Int {
@@ -130,10 +109,12 @@ class SenseService : Service() {
                     if (mCameraAuthController == null) {
                         return -1
                     }
-                    if (result == 0) {
-                        mIsAuthenticated = true
-                        mCameraAuthController!!.stop()
-                    }
+                }
+                if (result == 0) {
+                    // Report the match now. Closing the camera takes ~270 ms on pepito
+                    // (stopPreview + flush) and keyguard does not need it closed first;
+                    // onAuthenticated() stops the controller, which releases the camera.
+                    onAuthenticated()
                 }
                 return result
             }
@@ -264,8 +245,6 @@ class SenseService : Service() {
     override fun onCreate() {
         super.onCreate()
         if (Util.IS_DEBUG_LOGGING) Log.i(TAG, "onCreate")
-        mCameraManager = getSystemService(CameraManager::class.java)
-        mCameraId = CameraUtil.getCameraId(this)
         val handlerThread = HandlerThread(TAG, -2)
         handlerThread.start()
         mWorkHandler = FaceHandler(handlerThread.looper)
@@ -324,7 +303,6 @@ class SenseService : Service() {
         mChallenge = 0
         mChallengeCount = 0
         mEnrollToken = null
-        mIsAuthenticated = false
         mIsVendorInit = false
         mWorkHandler!!.post { initVendor() }
     }
@@ -537,7 +515,6 @@ class SenseService : Service() {
 
         override fun authenticate(operationId: Long) {
             activateUser()
-            mCameraManager!!.registerAvailabilityCallback(mCameraAvailabilityCallback, mWorkHandler)
             if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "authenticate")
             if (!Util.isFaceUnlockAvailable(mUserContext) ||
                 ContextCompat.checkSelfPermission(
